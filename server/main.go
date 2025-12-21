@@ -60,7 +60,7 @@ func (db *DB) NextIP() string {
 		}
 	}
 
-	for i := 1; i <= 254; i++ {
+	for i := 2; i <= 254; i++ {
 		if !used[i] {
 			return fmt.Sprintf("10.0.0.%d", i)
 		}
@@ -89,7 +89,7 @@ func (db *DB) GetPeers(exclude string) ([]Peer, error) {
 func AddPeerToWG(pubKey, ip string) error {
 	cmd := exec.Command("wg", "set", "wg0",
 		"peer", pubKey,
-		"allowed-ips", ip+"/32",
+		"allowed-ips", ip+"/24",
 		"persistent-keepalive", "25")
 	return cmd.Run()
 }

@@ -32,3 +32,5 @@ go.work.sum
 # .vscode/
 /server/server
 /client/client
+.DS_Store
+/client/wg.key

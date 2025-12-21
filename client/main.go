@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
+	"strings"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -16,43 +21,90 @@ import (
 )
 
 const (
-	API_SERVER  = "http://192.168.1.106:8080"
-	DERP_SERVER = "192.168.1.106:3478"
-	KEY_FILE    = "wg.key"
+	API_SERVER = "http://192.168.1.104:8080"
+	KEY_FILE   = "wg.key"
 )
-
-type RegisterResponse struct {
-	IP    string `json:"ip"`
-	Peers []Peer `json:"peers"`
-}
 
 type Peer struct {
 	PublicKey string `json:"pub"`
 	IP        string `json:"ip"`
 }
 
+type RegisterResponse struct {
+	IP    string `json:"ip"`
+	Peers []Peer `json:"peers"`
+}
+
 func main() {
+	log.Println("Starting client...")
+
 	key := loadOrCreateKey()
+	log.Println("Loaded WireGuard key:", key.PublicKey().String())
 
-	tunDev, err := tun.CreateTUN("utun7", 1420)
-	if err != nil {
-		log.Fatal(err)
+	ifName := "utun7"
+	if runtime.GOOS == "windows" {
+		ifName = "WGUTUN0"
 	}
-	bind := newDERPBind(DERP_SERVER)
 
-	logger := device.NewLogger(device.LogLevelSilent, "wg")
+	// TUN device oluştur
+	log.Println("Creating TUN device:", ifName)
+	tunDev, err := tun.CreateTUN(ifName, 1420)
+	if err != nil {
+		log.Fatal("Failed to create TUN:", err)
+	}
+	log.Println("TUN device created:", ifName)
+
+	// UDP bind
+	raddr, err := net.ResolveUDPAddr("udp", "192.168.1.104:51820")
+	if err != nil {
+		log.Fatal("Failed to resolve server UDP:", err)
+	}
+	c, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		log.Fatal("Failed to create UDP connection:", err)
+	}
+	bind := &derpBind{conn: c}
+	log.Println("UDP bind created to", raddr.String())
+
+	// WireGuard device
+	logger := device.NewLogger(device.LogLevelVerbose, "wg")
 	wg := device.NewDevice(tunDev, bind, logger)
-	wg.Up()
+	log.Println("WireGuard device created, calling wg.Up()...")
+	if err := safeUp(wg); err != nil {
+		log.Fatal("wg.Up() failed:", err)
+	}
+	log.Println("WireGuard device is UP")
 
+	// Register ve IP al
+	log.Println("Registering to server with public key...")
 	resp := register(key.PublicKey().String())
-	configureWG(wg, key, resp)
+	log.Println("Received from server IP:", resp.IP, "Peers:", len(resp.Peers))
 
-	log.Println("nenguard client running")
+	// WireGuard konfig
+	log.Println("Configuring WireGuard interface...")
+	configureWG(wg, key, resp)
+	log.Println("WireGuard configuration applied")
+
+	// TUN interface IP ve route
+	log.Println("Assigning IP and routes to TUN interface...")
+	setupTun(ifName, resp.IP)
+
+	log.Println("Client fully started. Assigned IP:", resp.IP)
 	select {}
 }
 
-//////////////////// KEY ////////////////////
+// wg.Up() sırasında panic kontrolü
+func safeUp(dev *device.Device) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in wg.Up(): %v", r)
+		}
+	}()
+	dev.Up()
+	return nil
+}
 
+// Key yönetimi
 func loadOrCreateKey() wgtypes.Key {
 	if b, err := os.ReadFile(KEY_FILE); err == nil {
 		k, _ := wgtypes.ParseKey(string(bytes.TrimSpace(b)))
@@ -63,57 +115,100 @@ func loadOrCreateKey() wgtypes.Key {
 	return k
 }
 
-//////////////////// CONTROL PLANE ////////////////////
-
+// Server register
 func register(pub string) RegisterResponse {
 	body, _ := json.Marshal(map[string]string{"pub": pub})
-	resp, err := http.Post(API_SERVER+"/register", "application/json", bytes.NewReader(body))
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(API_SERVER+"/register", "application/json", bytes.NewReader(body))
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Register failed:", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != 200 {
+		log.Fatal("Server returned non-200 status:", resp.Status)
+	}
+
 	var r RegisterResponse
-	_ = json.NewDecoder(resp.Body).Decode(&r)
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		log.Fatal("JSON decode failed:", err)
+	}
+	if r.IP == "" {
+		log.Fatal("Server returned empty IP")
+	}
 	return r
 }
 
-//////////////////// WG CONFIG ////////////////////
-
+// WireGuard konfig
 func configureWG(dev *device.Device, key wgtypes.Key, r RegisterResponse) {
-	cfg := "private_key=" + hex.EncodeToString(key[:]) + "\nlisten_port=0\n"
+	cfg := "private_key=" + hex.EncodeToString(key[:]) + "\nlisten_port=51820\n"
 
 	for _, p := range r.Peers {
 		cfg += "\n[peer]\n"
 		cfg += "public_key=" + p.PublicKey + "\n"
-		cfg += "allowed_ip=" + p.IP + "\n"
+		cfg += "allowed_ips=" + p.IP + "\n"
 		cfg += "persistent_keepalive_interval=25\n"
 	}
 
 	if err := dev.IpcSet(cfg); err != nil {
-		log.Fatal(err)
+		log.Fatal("Failed to configure WireGuard:", err)
 	}
-
-	log.Println("WireGuard configured, IP:", r.IP)
 }
 
-//////////////////// DERP BIND ////////////////////
+// TUN IP ve route ekleme
+func setupTun(ifName, ip string) {
+	log.Println("setupTun called with IP:", ip)
+	if ip == "" {
+		log.Println("setupTun: IP boş, atama yapılmıyor")
+		return
+	}
 
+	switch runtime.GOOS {
+	case "linux":
+		parts := strings.Split(ip, "/")
+		addr := parts[0]
+		mask := "24"
+		if len(parts) > 1 {
+			mask = parts[1]
+		}
+		runCmd("sudo", "ip", "addr", "add", addr+"/"+mask, "dev", ifName)
+		runCmd("sudo", "ip", "link", "set", "dev", ifName, "up")
+		runCmd("sudo", "ip", "route", "add", "10.0.0.0/24", "dev", ifName)
+
+	case "darwin":
+		parts := strings.Split(ip, "/")
+		addr := parts[0]
+		runCmd("sudo", "ifconfig", ifName, addr, addr, "up")
+		runCmd("sudo", "route", "-n", "add", "-net", "10.0.0.0/24", addr)
+
+	case "windows":
+		parts := strings.Split(ip, "/")
+		addr := parts[0]
+		runCmd("netsh", "interface", "ip", "set", "address", "name="+ifName, "static", addr, "255.255.255.0")
+		runCmd("netsh", "interface", "ip", "add", "route", "10.0.0.0/24", ifName)
+
+	default:
+		log.Println("Unsupported OS for automatic TUN IP assignment")
+	}
+}
+
+func runCmd(name string, args ...string) {
+	log.Println("Executing:", name, strings.Join(args, " "))
+	if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+		log.Println("Command failed:", err, "Output:", string(out))
+	}
+}
+
+// derpBind UDP wrap
 type derpBind struct {
 	conn *net.UDPConn
 }
 
-func newDERPBind(addr string) conn.Bind {
-	raddr, _ := net.ResolveUDPAddr("udp", addr)
-	c, _ := net.DialUDP("udp", nil, raddr)
-	return &derpBind{conn: c}
-}
-
 func (b *derpBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
-	recv := func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (n int, err error) {
+	recv := func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
 		return 0, nil
 	}
-
 	return []conn.ReceiveFunc{recv}, port, nil
 }
 
