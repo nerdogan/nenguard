@@ -41,6 +41,7 @@ func main() {
 	key := loadOrCreateKey()
 	log.Println("Loaded WireGuard key:", key.PublicKey().String())
 
+	// TUN interface adı OS’e göre
 	ifName := "utun7"
 	if runtime.GOOS == "windows" {
 		ifName = "WGUTUN0"
@@ -52,9 +53,14 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to create TUN:", err)
 	}
-	log.Println("TUN device created:", ifName)
 
-	// UDP bind
+	name, err := tunDev.Name()
+	if err != nil {
+		log.Fatal("Failed to get TUN device name:", err)
+	}
+	log.Println("TUN device created:", name)
+
+	// UDP bind (WireGuard)
 	raddr, err := net.ResolveUDPAddr("udp", "192.168.1.104:51820")
 	if err != nil {
 		log.Fatal("Failed to resolve server UDP:", err)
@@ -156,35 +162,28 @@ func configureWG(dev *device.Device, key wgtypes.Key, r RegisterResponse) {
 	}
 }
 
-// TUN IP ve route ekleme
+// TUN IP ve route ekleme OS’e göre
 func setupTun(ifName, ip string) {
-	log.Println("setupTun called with IP:", ip)
+	log.Println("setupTun called with interface:", ifName, "IP:", ip)
 	if ip == "" {
 		log.Println("setupTun: IP boş, atama yapılmıyor")
 		return
 	}
 
+	parts := strings.Split(ip, "/")
+	addr := parts[0]
+
 	switch runtime.GOOS {
 	case "linux":
-		parts := strings.Split(ip, "/")
-		addr := parts[0]
-		mask := "24"
-		if len(parts) > 1 {
-			mask = parts[1]
-		}
-		runCmd("sudo", "ip", "addr", "add", addr+"/"+mask, "dev", ifName)
-		runCmd("sudo", "ip", "link", "set", "dev", ifName, "up")
-		runCmd("sudo", "ip", "route", "add", "10.0.0.0/24", "dev", ifName)
+		runCmd("ip", "addr", "add", ip, "dev", ifName)
+		runCmd("ip", "link", "set", "dev", ifName, "up")
+		runCmd("ip", "route", "add", "10.0.0.0/24", "dev", ifName)
 
 	case "darwin":
-		parts := strings.Split(ip, "/")
-		addr := parts[0]
-		runCmd("sudo", "ifconfig", ifName, addr, addr, "up")
-		runCmd("sudo", "route", "-n", "add", "-net", "10.0.0.0/24", addr)
+		runCmd("ifconfig", ifName, "inet", addr, addr, "up")
+		runCmd("route", "-n", "add", "-net", "10.0.0.0/24", addr)
 
 	case "windows":
-		parts := strings.Split(ip, "/")
-		addr := parts[0]
 		runCmd("netsh", "interface", "ip", "set", "address", "name="+ifName, "static", addr, "255.255.255.0")
 		runCmd("netsh", "interface", "ip", "add", "route", "10.0.0.0/24", ifName)
 
@@ -195,8 +194,10 @@ func setupTun(ifName, ip string) {
 
 func runCmd(name string, args ...string) {
 	log.Println("Executing:", name, strings.Join(args, " "))
-	if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
-		log.Println("Command failed:", err, "Output:", string(out))
+	out, err := exec.Command(name, args...).CombinedOutput()
+	log.Println("Output:", string(out))
+	if err != nil {
+		log.Println("Command failed:", err)
 	}
 }
 

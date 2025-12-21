@@ -134,7 +134,7 @@ func main() {
 
 		peers, _ := db.GetPeers(req.Pub)
 		resp := map[string]interface{}{
-			"ip":    ip + "/32",
+			"ip":    ip + "/24",
 			"peers": peers,
 		}
 
