@@ -2,27 +2,23 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
-	"time"
 
+	"github.com/joho/godotenv"
+	"golang.org/x/crypto/curve25519"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-)
-
-const (
-	API_SERVER = "http://192.168.1.104:8080"
-	KEY_FILE   = "wg.key"
 )
 
 type Peer struct {
@@ -35,194 +31,97 @@ type RegisterResponse struct {
 	Peers []Peer `json:"peers"`
 }
 
-func main() {
-	log.Println("Starting client...")
-
-	key := loadOrCreateKey()
-	log.Println("Loaded WireGuard key:", key.PublicKey().String())
-
-	// TUN interface adı OS’e göre
-	ifName := "utun7"
-	if runtime.GOOS == "windows" {
-		ifName = "WGUTUN0"
-	}
-
-	// TUN device oluştur
-	log.Println("Creating TUN device:", ifName)
-	tunDev, err := tun.CreateTUN(ifName, 1420)
-	if err != nil {
-		log.Fatal("Failed to create TUN:", err)
-	}
-
-	name, err := tunDev.Name()
-	if err != nil {
-		log.Fatal("Failed to get TUN device name:", err)
-	}
-	log.Println("TUN device created:", name)
-
-	// UDP bind (WireGuard)
-	raddr, err := net.ResolveUDPAddr("udp", "192.168.1.104:51820")
-	if err != nil {
-		log.Fatal("Failed to resolve server UDP:", err)
-	}
-	c, err := net.DialUDP("udp", nil, raddr)
-	if err != nil {
-		log.Fatal("Failed to create UDP connection:", err)
-	}
-	bind := &derpBind{conn: c}
-	log.Println("UDP bind created to", raddr.String())
-
-	// WireGuard device
-	logger := device.NewLogger(device.LogLevelVerbose, "wg")
-	wg := device.NewDevice(tunDev, bind, logger)
-	log.Println("WireGuard device created, calling wg.Up()...")
-	if err := safeUp(wg); err != nil {
-		log.Fatal("wg.Up() failed:", err)
-	}
-	log.Println("WireGuard device is UP")
-
-	// Register ve IP al
-	log.Println("Registering to server with public key...")
-	resp := register(key.PublicKey().String())
-	log.Println("Received from server IP:", resp.IP, "Peers:", len(resp.Peers))
-
-	// WireGuard konfig
-	log.Println("Configuring WireGuard interface...")
-	configureWG(wg, key, resp)
-	log.Println("WireGuard configuration applied")
-
-	// TUN interface IP ve route
-	log.Println("Assigning IP and routes to TUN interface...")
-	setupTun(ifName, resp.IP)
-
-	log.Println("Client fully started. Assigned IP:", resp.IP)
-	select {}
+type Keys struct {
+	Private string `json:"private_key"`
+	Public  string `json:"public_key"`
 }
 
-// wg.Up() sırasında panic kontrolü
-func safeUp(dev *device.Device) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic in wg.Up(): %v", r)
+// WireGuard IPC için Base64 anahtarı Hex formatına çevirir
+func decodeBase64ToHex(s64 string) string {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s64))
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(decoded)
+}
+
+func getOrCreateKeys(filename string) (Keys, error) {
+	var keys Keys
+	if _, err := os.Stat(filename); err == nil {
+		data, err := os.ReadFile(filename)
+		if err == nil {
+			err = json.Unmarshal(data, &keys)
+			if err == nil {
+				return keys, nil
+			}
 		}
-	}()
-	dev.Up()
-	return nil
-}
-
-// Key yönetimi
-func loadOrCreateKey() wgtypes.Key {
-	if b, err := os.ReadFile(KEY_FILE); err == nil {
-		k, _ := wgtypes.ParseKey(string(bytes.TrimSpace(b)))
-		return k
 	}
-	k, _ := wgtypes.GeneratePrivateKey()
-	_ = os.WriteFile(KEY_FILE, []byte(k.String()), 0600)
-	return k
+
+	var priv [32]byte
+	rand.Read(priv[:])
+	priv[0] &= 248
+	priv[31] &= 127
+	priv[31] |= 64
+
+	var pub [32]byte
+	curve25519.ScalarBaseMult(&pub, &priv)
+
+	keys.Private = base64.StdEncoding.EncodeToString(priv[:])
+	keys.Public = base64.StdEncoding.EncodeToString(pub[:])
+
+	data, _ := json.MarshalIndent(keys, "", "  ")
+	os.WriteFile(filename, data, 0600)
+	return keys, nil
 }
 
-// Server register
-func register(pub string) RegisterResponse {
-	body, _ := json.Marshal(map[string]string{"pub": pub})
+func main() {
+	_ = godotenv.Load()
+	keys, _ := getOrCreateKeys("wg.key")
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(API_SERVER+"/register", "application/json", bytes.NewReader(body))
+	regURL := os.Getenv("REGISTRATION_URL")
+	serverEndpoint := os.Getenv("SERVER_ENDPOINT")
+
+	ifaceName := "wg0"
+	if runtime.GOOS == "darwin" {
+		ifaceName = "utun7"
+	}
+
+	// 1. Kayıt
+	regData, _ := json.Marshal(map[string]string{"pub": keys.Public})
+	resp, err := http.Post(regURL, "application/json", bytes.NewBuffer(regData))
 	if err != nil {
-		log.Fatal("Register failed:", err)
+		log.Fatal("Sunucu hatası:", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		log.Fatal("Server returned non-200 status:", resp.Status)
+	body, _ := io.ReadAll(resp.Body)
+	var regResponse RegisterResponse
+	json.Unmarshal(body, &regResponse)
+
+	host := regResponse.Peers[0]
+
+	// 2. Tünel ve Logger
+	tunDevice, err := tun.CreateTUN(ifaceName, 1280)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	var r RegisterResponse
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		log.Fatal("JSON decode failed:", err)
-	}
-	if r.IP == "" {
-		log.Fatal("Server returned empty IP")
-	}
-	return r
-}
+	logger := device.NewLogger(device.LogLevelVerbose, "WG: ")
+	dev := device.NewDevice(tunDevice, conn.NewDefaultBind(), logger)
 
-// WireGuard konfig
-func configureWG(dev *device.Device, key wgtypes.Key, r RegisterResponse) {
-	cfg := "private_key=" + hex.EncodeToString(key[:]) + "\nlisten_port=51820\n"
+	// ÖNEMLİ: Anahtarları Hex formatına çeviriyoruz
+	privHex := decodeBase64ToHex(keys.Private)
+	pubHex := decodeBase64ToHex(host.PublicKey)
 
-	for _, p := range r.Peers {
-		cfg += "\n[peer]\n"
-		cfg += "public_key=" + p.PublicKey + "\n"
-		cfg += "allowed_ips=" + p.IP + "\n"
-		cfg += "persistent_keepalive_interval=25\n"
-	}
+	// IPC Config (Hex formatında gönderilmeli)
+	cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=0.0.0.0/0\npersistent_keepalive_interval=5\n",
+		privHex, pubHex, serverEndpoint)
 
 	if err := dev.IpcSet(cfg); err != nil {
-		log.Fatal("Failed to configure WireGuard:", err)
-	}
-}
-
-// TUN IP ve route ekleme OS’e göre
-func setupTun(ifName, ip string) {
-	log.Println("setupTun called with interface:", ifName, "IP:", ip)
-	if ip == "" {
-		log.Println("setupTun: IP boş, atama yapılmıyor")
-		return
+		log.Fatalf("IPC hatası: %v", err)
 	}
 
-	parts := strings.Split(ip, "/")
-	addr := parts[0]
-
-	switch runtime.GOOS {
-	case "linux":
-		runCmd("ip", "addr", "add", ip, "dev", ifName)
-		runCmd("ip", "link", "set", "dev", ifName, "up")
-		runCmd("ip", "route", "add", "10.0.0.0/24", "dev", ifName)
-
-	case "darwin":
-		runCmd("ifconfig", ifName, "inet", addr, addr, "up")
-		runCmd("route", "-n", "add", "-net", "10.0.0.0/24", addr)
-
-	case "windows":
-		runCmd("netsh", "interface", "ip", "set", "address", "name="+ifName, "static", addr, "255.255.255.0")
-		runCmd("netsh", "interface", "ip", "add", "route", "10.0.0.0/24", ifName)
-
-	default:
-		log.Println("Unsupported OS for automatic TUN IP assignment")
-	}
-}
-
-func runCmd(name string, args ...string) {
-	log.Println("Executing:", name, strings.Join(args, " "))
-	out, err := exec.Command(name, args...).CombinedOutput()
-	log.Println("Output:", string(out))
-	if err != nil {
-		log.Println("Command failed:", err)
-	}
-}
-
-// derpBind UDP wrap
-type derpBind struct {
-	conn *net.UDPConn
-}
-
-func (b *derpBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
-	recv := func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-		return 0, nil
-	}
-	return []conn.ReceiveFunc{recv}, port, nil
-}
-
-func (b *derpBind) Send(pkts [][]byte, _ conn.Endpoint) error {
-	for _, p := range pkts {
-		_, _ = b.conn.Write(p)
-	}
-	return nil
-}
-
-func (b *derpBind) Close() error         { return b.conn.Close() }
-func (b *derpBind) BatchSize() int       { return 1 }
-func (b *derpBind) SetMark(uint32) error { return nil }
-func (b *derpBind) ParseEndpoint(string) (conn.Endpoint, error) {
-	return nil, nil
+	dev.Up()
+	log.Printf("Bağlantı aktif! IP: %s | Interface: %s", regResponse.IP, ifaceName)
+	select {}
 }
