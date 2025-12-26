@@ -74,7 +74,10 @@ func getOrCreateKeys(filename string) (Keys, error) {
 		return keys, nil
 	}
 	var priv [32]byte
-	rand.Read(priv[:]); priv[0] &= 248; priv[31] &= 127; priv[31] |= 64
+	rand.Read(priv[:])
+	priv[0] &= 248
+	priv[31] &= 127
+	priv[31] |= 64
 	var pub [32]byte
 	curve25519.ScalarBaseMult(&pub, &priv)
 	keys.Private = base64.StdEncoding.EncodeToString(priv[:])
@@ -92,12 +95,16 @@ func main() {
 	serverEndpoint := os.Getenv("SERVER_ENDPOINT")
 
 	ifaceName := "wg0"
-	if runtime.GOOS == "darwin" { ifaceName = "utun7" }
+	if runtime.GOOS == "darwin" {
+		ifaceName = "utun7"
+	}
 
 	// 1. Register
 	regData, _ := json.Marshal(map[string]string{"pub": keys.Public})
 	resp, err := http.Post(regURL, "application/json", bytes.NewBuffer(regData))
-	if err != nil { log.Fatal(err) }
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
@@ -106,12 +113,14 @@ func main() {
 	host := regResponse.Peers[0]
 
 	// 2. TUN & Device
-	tunDevice, err := tun.CreateTUN(ifaceName, 1280)
-	if err != nil { log.Fatal(err) }
+	tunDevice, err := tun.CreateTUN(ifaceName, 1420)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	dev := device.NewDevice(tunDevice, conn.NewDefaultBind(), device.NewLogger(device.LogLevelVerbose, "WG: "))
 
-	// AllowedIPs=0.0.0.0/0 her şeyi tünele basar, 10.0.0.0/24 sadece VPN'i. 
+	// AllowedIPs=0.0.0.0/0 her şeyi tünele basar, 10.0.0.0/24 sadece VPN'i.
 	// Diğer istemcilere ping atmak için 10.0.0.0/24 olmalı.
 	cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=10.0.0.0/24\npersistent_keepalive_interval=5\n",
 		decodeBase64ToHex(keys.Private), decodeBase64ToHex(host.PublicKey), serverEndpoint)
