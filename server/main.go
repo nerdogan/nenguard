@@ -91,7 +91,7 @@ func AddPeerToWG(pubKey, ip string) error {
 	// Eğer istemciler arası ping sorunu olursa burayı ip+"/32" yapmayı dene.
 	cmd := exec.Command("wg", "set", "wg0",
 		"peer", pubKey,
-		"allowed-ips", ip+"/24",
+		"allowed-ips", ip+"/32",
 		"persistent-keepalive", "25")
 	return cmd.Run()
 }
