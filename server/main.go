@@ -29,9 +29,9 @@ func InitDB() *DB {
 	}
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS peers (
-		pub TEXT PRIMARY KEY,
-		ip TEXT UNIQUE
-	)`)
+        pub TEXT PRIMARY KEY,
+        ip TEXT UNIQUE
+    )`)
 
 	return &DB{DB: db}
 }
@@ -87,6 +87,8 @@ func (db *DB) GetPeers(exclude string) ([]Peer, error) {
 
 // Add peer to WireGuard interface
 func AddPeerToWG(pubKey, ip string) error {
+	// Not: ip+"/24" tüm VPN ağını bu peer üzerinden yönlendirmeye çalışabilir.
+	// Eğer istemciler arası ping sorunu olursa burayı ip+"/32" yapmayı dene.
 	cmd := exec.Command("wg", "set", "wg0",
 		"peer", pubKey,
 		"allowed-ips", ip+"/24",
@@ -94,8 +96,32 @@ func AddPeerToWG(pubKey, ip string) error {
 	return cmd.Run()
 }
 
+// YENİ: Sunucu açılışında peerları WG arayüzüne geri yükler
+func (db *DB) RestorePeers() {
+	rows, err := db.DB.Query("SELECT pub, ip FROM peers")
+	if err != nil {
+		log.Println("RestorePeers hatası:", err)
+		return
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var pub, ip string
+		if err := rows.Scan(&pub, &ip); err == nil {
+			if err := AddPeerToWG(pub, ip); err == nil {
+				count++
+			}
+		}
+	}
+	log.Printf("Veritabanından %d peer wg0 arayüzüne başarıyla geri yüklendi.", count)
+}
+
 func main() {
 	db := InitDB()
+
+	// Sunucu başlarken mevcut kayıtları wg0'a basıyoruz
+	db.RestorePeers()
 
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -130,6 +156,10 @@ func main() {
 			} else {
 				log.Println("Added new peer to wg0:", req.Pub, ip)
 			}
+		} else {
+			// Mevcut peer yeniden kayıt olmaya çalışıyorsa (veya sunucu restart sonrası tüneli düşmüşse)
+			// Arayüzde olup olmadığını garantiye alalım
+			AddPeerToWG(req.Pub, ip)
 		}
 
 		peers, _ := db.GetPeers(req.Pub)
