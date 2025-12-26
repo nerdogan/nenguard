@@ -37,36 +37,28 @@ type Keys struct {
 	Public  string `json:"public_key"`
 }
 
-// İşletim sistemine göre ağ yapılandırması yapar
 func configureNetwork(iface, localIP string) {
-	// localIP genellikle "10.0.0.5/24" formatında gelir.
-	// Bazı OS komutları maskesiz IP bekler.
 	pureIP := strings.Split(localIP, "/")[0]
+	log.Printf("Network Konfigürasyonu: %s (%s)", iface, localIP)
 
-	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		// macOS: IP ata ve route ekle
 		exec.Command("ifconfig", iface, pureIP, pureIP, "netmask", "255.255.255.0", "up").Run()
-		cmd = exec.Command("route", "add", "-net", "10.0.0.0/24", "-interface", iface)
+		exec.Command("route", "add", "-net", "10.0.0.0/24", "-interface", iface).Run()
 	case "linux":
-		// Linux: IP ata ve linki ayağa kaldır
-		exec.Command("ip", "addr", "add", localIP, "dev", iface).Run()
+		// Hata almamak için önce temizle sonra ekle
 		exec.Command("ip", "link", "set", iface, "up").Run()
-		cmd = exec.Command("ip", "route", "add", "10.0.0.0/24", "dev", iface)
-	case "windows":
-		// Windows: netsh ile IP yapılandır (Yönetici yetkisi gerekir)
-		// Not: Windows'ta interface ismi tam eşleşmelidir.
-		exec.Command("netsh", "interface", "ip", "set", "address", "name="+iface, "static", pureIP, "255.255.255.0").Run()
-		cmd = exec.Command("route", "add", "10.0.0.0", "mask", "255.255.255.0", pureIP)
-	}
-
-	if cmd != nil {
-		if err := cmd.Run(); err != nil {
-			log.Printf("Yönlendirme hatası (Routing Error): %v", err)
-		} else {
-			log.Printf("Ağ yapılandırıldı: %s (%s)", iface, localIP)
+		exec.Command("ip", "addr", "flush", "dev", iface).Run()
+		exec.Command("ip", "addr", "add", localIP, "dev", iface).Run()
+		// Rota çakışmasını önlemek için
+		exec.Command("ip", "route", "del", "10.0.0.0/24").Run()
+		err := exec.Command("ip", "route", "add", "10.0.0.0/24", "dev", iface).Run()
+		if err != nil {
+			log.Printf("Linux Route Error: %v", err)
 		}
+	case "windows":
+		exec.Command("netsh", "interface", "ip", "set", "address", "name="+iface, "static", pureIP, "255.255.255.0").Run()
+		exec.Command("route", "add", "10.0.0.0", "mask", "255.255.255.0", pureIP).Run()
 	}
 }
 
@@ -82,10 +74,7 @@ func getOrCreateKeys(filename string) (Keys, error) {
 		return keys, nil
 	}
 	var priv [32]byte
-	rand.Read(priv[:])
-	priv[0] &= 248
-	priv[31] &= 127
-	priv[31] |= 64
+	rand.Read(priv[:]); priv[0] &= 248; priv[31] &= 127; priv[31] |= 64
 	var pub [32]byte
 	curve25519.ScalarBaseMult(&pub, &priv)
 	keys.Private = base64.StdEncoding.EncodeToString(priv[:])
@@ -103,16 +92,12 @@ func main() {
 	serverEndpoint := os.Getenv("SERVER_ENDPOINT")
 
 	ifaceName := "wg0"
-	if runtime.GOOS == "darwin" {
-		ifaceName = "utun7"
-	}
+	if runtime.GOOS == "darwin" { ifaceName = "utun7" }
 
-	// 1. Sunucuya Kayıt
+	// 1. Register
 	regData, _ := json.Marshal(map[string]string{"pub": keys.Public})
 	resp, err := http.Post(regURL, "application/json", bytes.NewBuffer(regData))
-	if err != nil {
-		log.Fatal("Sunucu hatası:", err)
-	}
+	if err != nil { log.Fatal(err) }
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
@@ -120,26 +105,23 @@ func main() {
 	json.Unmarshal(body, &regResponse)
 	host := regResponse.Peers[0]
 
-	// 2. TUN Cihazı Oluştur
+	// 2. TUN & Device
 	tunDevice, err := tun.CreateTUN(ifaceName, 1280)
-	if err != nil {
-		log.Fatal("TUN oluşturulamadı:", err)
-	}
+	if err != nil { log.Fatal(err) }
 
 	dev := device.NewDevice(tunDevice, conn.NewDefaultBind(), device.NewLogger(device.LogLevelVerbose, "WG: "))
 
-	// 3. Konfigürasyon ve Handshake
-	cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=0.0.0.0/0\npersistent_keepalive_interval=5\n",
+	// AllowedIPs=0.0.0.0/0 her şeyi tünele basar, 10.0.0.0/24 sadece VPN'i. 
+	// Diğer istemcilere ping atmak için 10.0.0.0/24 olmalı.
+	cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=10.0.0.0/24\npersistent_keepalive_interval=5\n",
 		decodeBase64ToHex(keys.Private), decodeBase64ToHex(host.PublicKey), serverEndpoint)
 
-	if err := dev.IpcSet(cfg); err != nil {
-		log.Fatal(err)
-	}
+	dev.IpcSet(cfg)
 	dev.Up()
 
-	// 4. İŞLETİM SİSTEMİNE GÖRE ROUTE EKLEME
+	// 3. Configure OS Routing
 	configureNetwork(ifaceName, regResponse.IP)
 
-	log.Printf("Bağlantı aktif! IP: %s | Cihaz: %s", regResponse.IP, ifaceName)
+	log.Printf("Bağlantı Hazır: %s", regResponse.IP)
 	select {}
 }
