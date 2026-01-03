@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/curve25519"
@@ -86,6 +88,37 @@ func getOrCreateKeys(filename string) (Keys, error) {
 	os.WriteFile(filename, data, 0600)
 	return keys, nil
 }
+func monitorHandshake(dev *device.Device, timeout time.Duration) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		state, _ := dev.IpcGet()
+
+		if !strings.Contains(state, "last_handshake_time_sec") {
+			continue
+		}
+
+		lines := strings.Split(state, "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "last_handshake_time_sec=") {
+				secStr := strings.TrimPrefix(line, "last_handshake_time_sec=")
+				sec, _ := strconv.ParseInt(secStr, 10, 64)
+				if sec == 0 {
+					continue
+				}
+
+				last := time.Unix(sec, 0)
+				log.Println("Server ile son el sıkışma: ", time.Since(last))
+				if time.Since(last) > timeout {
+					log.Println("Server ile bağlantı koptu, VPN kapatılıyor")
+					dev.Down()
+					os.Exit(0)
+				}
+			}
+		}
+	}
+}
 
 func main() {
 	_ = godotenv.Load()
@@ -132,5 +165,6 @@ func main() {
 	configureNetwork(ifaceName, regResponse.IP)
 
 	log.Printf("Bağlantı Hazır: %s", regResponse.IP)
+	go monitorHandshake(dev, 6*time.Minute)
 	select {}
 }
