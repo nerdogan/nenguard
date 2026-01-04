@@ -61,6 +61,7 @@ func configureNetwork(iface, localIP string) {
 	case "windows":
 		exec.Command("netsh", "interface", "ip", "set", "address", "name="+iface, "static", pureIP, "255.255.255.0").Run()
 		exec.Command("route", "add", "10.0.0.0", "mask", "255.255.255.0", pureIP).Run()
+		exec.Command("netsh", "interface", "ipv4", "set", "subinterface", iface, "mtu=1280", "store=persistent").Run()
 	}
 }
 
@@ -146,7 +147,7 @@ func main() {
 	host := regResponse.Peers[0]
 
 	// 2. TUN & Device
-	tunDevice, err := tun.CreateTUN(ifaceName, 1420)
+	tunDevice, err := tun.CreateTUN(ifaceName, 1280)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -155,7 +156,7 @@ func main() {
 
 	// AllowedIPs=0.0.0.0/0 her şeyi tünele basar, 10.0.0.0/24 sadece VPN'i.
 	// Diğer istemcilere ping atmak için 10.0.0.0/24 olmalı.
-	cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=10.0.0.0/24\npersistent_keepalive_interval=5\n",
+	cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=10.0.0.0/24\n",
 		decodeBase64ToHex(keys.Private), decodeBase64ToHex(host.PublicKey), serverEndpoint)
 
 	dev.IpcSet(cfg)
