@@ -156,7 +156,7 @@ func main() {
 
 	// AllowedIPs=0.0.0.0/0 her şeyi tünele basar, 10.0.0.0/24 sadece VPN'i.
 	// Diğer istemcilere ping atmak için 10.0.0.0/24 olmalı.
-	cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=10.0.0.0/24\n",
+	cfg := fmt.Sprintf("private_key=%s\npublic_key=%s\nendpoint=%s\nallowed_ip=10.0.0.0/24\nkeepalive=10\n",
 		decodeBase64ToHex(keys.Private), decodeBase64ToHex(host.PublicKey), serverEndpoint)
 
 	dev.IpcSet(cfg)
