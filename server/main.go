@@ -122,6 +122,18 @@ func main() {
 	// Sunucu başlarken mevcut kayıtları wg0'a basıyoruz
 	db.RestorePeers()
 
+	cmd := exec.Command(
+		"iptables",
+		"-A", "FORWARD",
+		"-i", "wg0",
+		"-o", "wg0",
+		"-j", "ACCEPT",
+	)
+
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("iptables failed: %v", err)
+	}
+
 	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
