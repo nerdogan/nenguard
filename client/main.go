@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"runtime"
 	"strconv"
 	"strings"
@@ -89,6 +90,49 @@ func getOrCreateKeys(filename string) (Keys, error) {
 	os.WriteFile(filename, data, 0600)
 	return keys, nil
 }
+func getSystemInfo() (hostname string, username string, err error) {
+	hostname, err = os.Hostname()
+	if err != nil {
+		return "", "", fmt.Errorf("hostname alınamadı: %v", err)
+	}
+
+	currentUser, err := user.Current()
+	if err != nil {
+		return hostname, "", fmt.Errorf("kullanıcı bilgisi alınamadı: %v", err)
+	}
+
+	username = currentUser.Username
+	return hostname, username, nil
+}
+
+func sendTelegramMessage(message string) error {
+	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	chatID := os.Getenv("TELEGRAM_CHAT_ID")
+
+	if botToken == "" || chatID == "" {
+		return fmt.Errorf("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID tanımlanmamış")
+	}
+
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
+	payload := map[string]string{
+		"chat_id": chatID,
+		"text":    message,
+	}
+
+	data, _ := json.Marshal(payload)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Telegram API hatası: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
 func monitorHandshake(dev *device.Device, timeout time.Duration) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -113,8 +157,11 @@ func monitorHandshake(dev *device.Device, timeout time.Duration) {
 				log.Println("Server ile son el sıkışma: ", time.Since(last))
 				if time.Since(last) > timeout {
 					log.Println("Server ile bağlantı koptu, VPN kapatılıyor")
-					dev.Down()
-					os.Exit(0)
+					hostname, username, _ := getSystemInfo()
+					telegramMsg := fmt.Sprintf("VPN Bağlantısı Koptu ✅\n\nBilgisayar: %s\nKullanıcı: %s\n", hostname, username)
+					sendTelegramMessage(telegramMsg)
+					//dev.Down()
+					//os.Exit(0)
 				}
 			}
 		}
@@ -137,6 +184,9 @@ func main() {
 	regData, _ := json.Marshal(map[string]string{"pub": keys.Public})
 	resp, err := http.Post(regURL, "application/json", bytes.NewBuffer(regData))
 	if err != nil {
+		hostname, username, _ := getSystemInfo()
+		telegramMsg := fmt.Sprintf("VPN Bağlanamadı ✅\nBilgisayar: %s\tKullanıcı: %s\nHata: %s", hostname, username, err.Error())
+		sendTelegramMessage(telegramMsg)
 		log.Fatal(err)
 	}
 	defer resp.Body.Close()
