@@ -1,11 +1,29 @@
-name: Build Windows EXE
+name: Build and Release
 on:
   push:
-    branches: [main]
+    tags:
+      - 'v*'
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            output: nenclient.exe
+          - goos: darwin
+            goarch: amd64
+            output: nenclient-macos-intel
+          - goos: darwin
+            goarch: arm64
+            output: nenclient-macos-arm64
+          - goos: linux
+            goarch: amd64
+            output: nenclient-linux
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -13,14 +31,36 @@ jobs:
           go-version: '1.22'
           cache: true
           cache-dependency-path: client/go.sum
-      - name: Build Windows exe
+
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
-          GOOS: windows
-          GOARCH: amd64
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
         working-directory: ./client
-        run: go build -o nenclient.exe .
+        run: go build -o ${{ matrix.output }} .
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-exe
-          path: client/nenclient.exe
+          name: ${{ matrix.output }}
+          path: client/${{ matrix.output }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: artifacts/**/*
