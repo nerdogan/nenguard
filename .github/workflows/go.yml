@@ -19,6 +19,7 @@ jobs:
         env:
           GOOS: windows
           GOARCH: amd64
+        working-directory: ./client
         run: go build -o nenclient.exe ./client
 
       - name: Upload artifact
