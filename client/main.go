@@ -177,7 +177,7 @@ func main() {
 
 	ifaceName := "wg0"
 	if runtime.GOOS == "darwin" {
-		ifaceName = "utun7"
+		ifaceName = "utun"
 	}
 
 	// 1. Register
@@ -201,6 +201,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	devName, err := tunDevice.Name()
+	if err != nil {
+		log.Fatal(err)
+	}
+	println("TUN Device: ", devName)
+	ifaceName = devName // macOS için utunX ismini alıyoruz.
 
 	dev := device.NewDevice(tunDevice, conn.NewDefaultBind(), device.NewLogger(device.LogLevelVerbose, "WG: "))
 
